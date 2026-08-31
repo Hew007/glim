@@ -1,0 +1,40 @@
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+.pnpm-store/
+
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+**/*.rs.bk
+
+# 环境与密钥 —— 绝不提交
+.env
+.env.*
+!.env.example
+*.key
+secrets.json
+
+# 本地配置
+settings.json
+!src-tauri/settings.example.json
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志与门禁产物
+*.log
+gates/**/*.png
+gates/**/*.json
+!gates/README.md
