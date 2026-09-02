@@ -211,16 +211,22 @@ fn log_line(app: &AppHandle, line: &str) {
     }
 }
 
-/// 「点击外部关闭」：NOACTIVATE 的窗口收不到失焦事件，改为在可见期间
-/// 轮询鼠标左键的按下沿 + 光标是否落在窗口矩形外。不装任何钩子（§1）。
+/// 「点击外部关闭」：NOACTIVATE 的窗口收不到失焦事件，改为轮询鼠标左键的
+/// 按下沿 + 光标是否落在窗口矩形外。不装任何钩子（§1）。
+///
+/// 只在面板可见时才真正判定关闭，但按键状态**始终**跟踪 —— 否则
+/// 「按下沿」会把面板出现那一刻就已按住的左键算作一次新点击。
 pub fn spawn_outside_click_watcher(app: AppHandle) {
     std::thread::spawn(move || {
         let mut was_down = false;
         loop {
             std::thread::sleep(Duration::from_millis(POLL_INTERVAL_MS));
 
+            // 隐藏期间必须继续跟踪左键的真实状态，不能清零：清零会让
+            // 「面板出现时左键正按着」在下一次轮询里被当成一次新的按下沿，
+            // 面板一闪即消失（按住左键拖选、不松手直接按热键就会触发）。
             if !app.state::<PanelState>().is_visible() {
-                was_down = false;
+                was_down = win::is_left_button_down();
                 continue;
             }
 
