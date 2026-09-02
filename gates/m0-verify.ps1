@@ -100,7 +100,8 @@ function Get-Rect([IntPtr]$h) {
 
 # ---------------------------------------------------------------- 启动
 $timingLog = Join-Path $env:APPDATA "glim\hotkey-timing.log"
-Remove-Item $timingLog -ErrorAction SilentlyContinue
+# 这里不删日志：-MemoryOnly 一次热键都不按，删了就再也不会重建，
+# 上一次全量运行的证据会被无声抹掉。清空动作放在 0.1c 段，那里马上就会重新写满。
 
 $exePath = (Resolve-Path $Exe).Path
 Get-Process -Name Glim -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -168,8 +169,19 @@ for ($i = 1; $i -le 20; $i++) {
 }
 "[0.1c] toggle 20 轮全部正确 = $toggleOk"
 
+# 相位一旦被一次计划外的 hide 打乱，之后每一轮都会报错，光看 $toggleOk
+# 分不清是产品 bug 还是跑的时候碰了鼠标。把非 toggle 的 hide 原因直接列出来。
+$strayHides = @(Get-Content $timingLog -ErrorAction SilentlyContinue |
+  Where-Object { $_ -match '^\[hide\]' -and $_ -notmatch 'hotkey-toggle' })
+if ($strayHides.Count -gt 0) {
+  "[0.1c] 计划外 hide $($strayHides.Count) 次（toggle 相位被打乱的原因）："
+  $strayHides | ForEach-Object { "    $_" }
+} else {
+  "[0.1c] 计划外 hide = 0"
+}
+
 $samples = @(Get-Content $timingLog | ForEach-Object { if ($_ -match '#(\d+) (\d+)us') { [int]$Matches[2] } })
-"[0.1] 采样数 = $($samples.Count)"
+"[0.1] 采样数 = $($samples.Count)（期望 20；多出来的每一个都对应一次计划外 hide）"
 if ($samples.Count -gt 0) {
   $sorted = $samples | Sort-Object
   $p95Index = [Math]::Ceiling(0.95 * $sorted.Count) - 1
@@ -178,7 +190,11 @@ if ($samples.Count -gt 0) {
 }
 
 # ---------------------------------------------------------------- 0.3 不夺焦点
-$np = Start-Process notepad -PassThru
+# Win11 记事本会恢复上次的标签页，裸开会把旧文档的内容一起算进来
+# （实测拿到的是 hosts 文件的首行，而不是本次输入）。指定一个空临时文件。
+$npFile = Join-Path $env:TEMP ("glim-m0-{0}.txt" -f [guid]::NewGuid())
+Set-Content -LiteralPath $npFile -Value "" -NoNewline
+$np = Start-Process notepad -ArgumentList $npFile -PassThru
 Start-Sleep -Seconds 3
 [System.Windows.Forms.SendKeys]::SendWait("123")
 Start-Sleep -Milliseconds 500
@@ -234,6 +250,7 @@ Send-EscapeKey
 Start-Sleep -Milliseconds 400
 
 $np | Stop-Process -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $npFile -Force -ErrorAction SilentlyContinue
 
 # ---------------------------------------------------------------- 0.5 多屏四角
 "[0.5] 多显示器四角定位"
