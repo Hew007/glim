@@ -328,6 +328,11 @@ if ($Memory) {
   "[0.6] 峰值：总工作集 $peakWorking MB（含 Chromium 共享页重复计入，仅供参考）"
 }
 
+# 收尾必须结束进程：exe 还在跑的话，下一次 `pnpm tauri build` 覆盖不了
+# target\release\Glim.exe，会以 "Access is denied. (os error 5)" 失败。
+# 开头那次 Stop-Process 只清理上一轮的残留，管不到本轮自己启动的。
+$proc | Stop-Process -Force -ErrorAction SilentlyContinue
+
 if (-not $MemoryOnly) {
   $archived = Join-Path (Split-Path $PSScriptRoot -Parent) "gates\M0-timing.log"
   Copy-Item $timingLog $archived -Force
