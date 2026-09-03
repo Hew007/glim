@@ -101,7 +101,9 @@ impl Default for RequestState {
             // 客户端复用连接池。连接超时单独设短一点，断网时快速落到
             // Network 而不是干等到首字符超时（§4.2）。
             client: reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(5))
+                // 10s 而不是 5s：走代理或 VPN 时握手本来就慢，超时太紧会把
+                // 「慢」误报成「断网」。首字符超时另有 15s 的看门狗兜底。
+                .connect_timeout(Duration::from_secs(10))
                 .build()
                 .unwrap_or_default(),
         }
@@ -401,10 +403,40 @@ fn extract_delta(
 
 fn map_send_error(error: reqwest::Error) -> (ErrorKind, String) {
     if error.is_connect() || error.is_timeout() || error.is_request() {
-        (ErrorKind::Network, "网络连接失败".to_string())
+        (ErrorKind::Network, describe_transport_error(error))
     } else {
         (ErrorKind::Unknown, error.to_string())
     }
+}
+
+/// 传输层错误的人话描述。
+///
+/// **底层原因必须带上。** 第一版这里写的是 `map_err(|_| "网络连接失败")`，
+/// 把 reqwest 的错误整个丢掉 —— 结果真出问题时，界面上只有一句「网络连接
+/// 失败」，分不清是 DNS 解析不了、TLS 握手失败、连接被拒还是超时，等于
+/// 没法排查。§4.2 要求的是「一句人话 + 一个动作」，不是「不许有技术细节」。
+pub fn describe_transport_error(error: reqwest::Error) -> String {
+    let hint = if error.is_timeout() {
+        "连接超时"
+    } else if error.is_connect() {
+        "连不上服务器"
+    } else {
+        "网络连接失败"
+    };
+
+    // reqwest 的 Display 只给最外层，真正有用的是链条末端的系统错误
+    // （dns error / certificate / connection refused 之类）。
+    let mut cause: Option<&dyn std::error::Error> = std::error::Error::source(&error);
+    let mut detail = String::new();
+    while let Some(current) = cause {
+        detail = current.to_string();
+        cause = current.source();
+    }
+    if detail.is_empty() {
+        detail = error.to_string();
+    }
+
+    format!("{hint}：{}", summarize(&detail))
 }
 
 fn map_status_error(status: reqwest::StatusCode, body: &str) -> (ErrorKind, String) {

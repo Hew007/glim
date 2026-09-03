@@ -112,7 +112,7 @@ async fn validate_api_key(
         .json(&body)
         .send()
         .await
-        .map_err(|_| "网络连接失败，请检查网络后重试".to_string())?;
+        .map_err(request::describe_transport_error)?;
 
     match response.status().as_u16() {
         200 => credentials::save(&config.id, &key),

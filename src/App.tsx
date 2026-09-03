@@ -289,11 +289,11 @@ function ErrorCard(props: {
       <div>
         <div>{kind === "NoApiKey" ? "还没有配置 API Key。" : "API Key 无效。"}</div>
         <div>1. 打开下面的地址，登录后创建一个免费的 API Key：</div>
-        {/* §5.1：地址始终以可选中的纯文本显示，不能只藏在按钮后面 —— 
-            AI Studio 改版导致链接失效时，用户至少还能手动访问。 */}
-        <div>
-          <input readOnly value={provider.api_key_url} onFocus={(e) => e.currentTarget.select()} />
-        </div>
+        {/* §5.1：地址始终完整可见、可选中，不能只藏在按钮后面 ——
+            AI Studio 改版导致链接失效时，用户至少还能手动访问。
+            这里用纯文本而不是 input：面板宽 420px，input 会把地址截断成
+            半截，复制不全等于没给。纯文本会自己换行。 */}
+        <div>{provider.api_key_url}</div>
         <div>2. 复制那串 Key，然后点这里：</div>
         <div>
           <button onClick={onPasteKey}>从剪贴板粘贴 Key 并验证</button>
