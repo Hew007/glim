@@ -441,7 +441,14 @@ pub fn describe_transport_error(error: reqwest::Error) -> String {
 
 fn map_status_error(status: reqwest::StatusCode, body: &str) -> (ErrorKind, String) {
     match status.as_u16() {
+        400 if body.contains("API_KEY_INVALID") => {
+            (ErrorKind::InvalidApiKey, "API Key 无效".to_string())
+        }
         401 | 403 => (ErrorKind::InvalidApiKey, "API Key 无效".to_string()),
+        404 => (
+            ErrorKind::Unknown,
+            "配置的模型不存在，或当前 Key 无权访问它。请在设置里换一个模型名。".to_string(),
+        ),
         429 => (ErrorKind::RateLimited, "请求太频繁".to_string()),
         _ => (
             ErrorKind::Unknown,

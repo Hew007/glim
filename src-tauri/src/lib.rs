@@ -114,11 +114,50 @@ async fn validate_api_key(
         .await
         .map_err(request::describe_transport_error)?;
 
-    match response.status().as_u16() {
-        200 => credentials::save(&config.id, &key),
-        401 | 403 => Err("API Key 无效".to_string()),
-        429 => Err("请求太频繁，请稍后再试".to_string()),
-        code => Err(format!("验证失败（HTTP {code}）")),
+    let status = response.status().as_u16();
+    if status == 200 {
+        return credentials::save(&config.id, &key);
+    }
+
+    let body = response.text().await.unwrap_or_default();
+    Err(describe_validation_failure(&app, &config, status, &body))
+}
+
+/// 校验失败的人话。**不能只甩一个 HTTP 状态码** —— §4.2 要求每个错误都有
+/// 一句看得懂的话加一个能做的动作，「验证失败（HTTP 404）」两样都不占。
+fn describe_validation_failure(
+    app: &AppHandle,
+    config: &settings::ProviderSettings,
+    status: u16,
+    body: &str,
+) -> String {
+    let config_hint = settings::settings_path(app)
+        .map(|path| format!("配置文件在 {}", path.display()))
+        .unwrap_or_else(|| "请修改配置文件".to_string());
+
+    match status {
+        // Key 格式不对时 Gemini 返回 400 而不是 401，正文里带 API_KEY_INVALID。
+        400 if body.contains("API_KEY_INVALID") => {
+            "API Key 无效。确认复制的是完整的一串，中间没有断行或空格。".to_string()
+        }
+        401 | 403 => "API Key 无效，或这个 Key 没有访问该模型的权限。".to_string(),
+        404 => format!(
+            "模型「{}」不存在，或当前 Key 无权访问它。\
+             把它改成一个可用的模型名再试 —— {}。",
+            config.model, config_hint
+        ),
+        429 => "请求太频繁，请稍后再试。".to_string(),
+        _ => format!("验证失败（HTTP {status}）：{}", summarize_body(body)),
+    }
+}
+
+/// 面板只有 420px 宽，错误正文截断到能看清的长度。
+fn summarize_body(body: &str) -> String {
+    let body = body.trim();
+    if body.chars().count() > 200 {
+        body.chars().take(200).collect::<String>() + "…"
+    } else {
+        body.to_string()
     }
 }
 
