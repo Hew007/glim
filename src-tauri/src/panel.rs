@@ -5,10 +5,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use windows::Win32::Foundation::HWND;
 
 use crate::hotkey;
+use crate::lang;
+use crate::request::{self, Mode, PanelShowPayload, RequestState};
 use crate::settings;
 use crate::win;
 
@@ -70,6 +73,30 @@ pub fn show(app: &AppHandle, t0: Option<Instant>) {
     // Esc 关闭：NOACTIVATE 的窗口拿不到键盘事件，只能在可见期间临时占用
     // Esc 全局快捷键，hide 时立刻注销。注册必须走工作线程，原因见 hotkey.rs。
     hotkey::register_escape(app);
+
+    // 窗口先出现，再读剪贴板发请求（§2.3 铁律）。这一步放在计时打点之后，
+    // 门禁 0.1 测的仍然是「按下热键 → 窗口可见」，不含后面的网络往返。
+    announce_clipboard(app);
+}
+
+/// 读剪贴板 → 判方向 → 推给前端。前端收到后自己调 `start_request`。
+///
+/// 剪贴板为图片或文件时 `read_text` 会失败，这里落到空串，由
+/// `start_request` 统一返回 `EmptyClipboard`，不在这里单独造一条错误路径（§4.3）。
+pub fn announce_clipboard(app: &AppHandle) {
+    let text = app.clipboard().read_text().unwrap_or_default();
+    let stored = settings::load(app);
+    let direction = lang::detect(&text, &stored.languages);
+
+    let _ = app.emit(
+        "panel:show",
+        PanelShowPayload {
+            text,
+            // M1 只打通翻译，查词分流是 M2（§8）。
+            mode: Mode::Translate,
+            direction,
+        },
+    );
 }
 
 /// 启动时的热键冲突提示：这一路径要让用户当场把新热键敲进输入框，
@@ -96,15 +123,28 @@ pub fn hide(app: &AppHandle, reason: &str) {
     win::set_noactivate(hwnd, true);
     app.state::<PanelState>().visible.store(false, Ordering::SeqCst);
     hotkey::unregister_escape(app);
+    // 看完即走：窗口一关，在途请求就没有接收方了，留着只会白烧配额。
+    request::cancel_active(app);
 }
 
 /// 热键再次按下 = toggle（§2.1 规则 6）。
+///
+/// 例外：请求进行中时不是关窗口，而是取消当前请求 + 重新读剪贴板 +
+/// 开始新请求，窗口保持可见（§4.3）。连按三次不同内容不该串台。
 pub fn toggle(app: &AppHandle, t0: Instant) {
-    if app.state::<PanelState>().is_visible() {
-        hide(app, "hotkey-toggle");
-    } else {
+    if !app.state::<PanelState>().is_visible() {
         show(app, Some(t0));
+        return;
     }
+
+    if app.state::<RequestState>().is_busy() {
+        log_line(app, "[reload] hotkey-while-loading\n");
+        request::cancel_active(app);
+        announce_clipboard(app);
+        return;
+    }
+
+    hide(app, "hotkey-toggle");
 }
 
 struct Placement {
@@ -196,7 +236,7 @@ fn record_timing(app: &AppHandle, elapsed: Duration, placement: &Placement) {
     log_line(app, &line);
 }
 
-fn log_line(app: &AppHandle, line: &str) {
+pub(crate) fn log_line(app: &AppHandle, line: &str) {
     let Some(dir) = settings::config_dir(app) else {
         return;
     };

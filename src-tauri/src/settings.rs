@@ -8,16 +8,73 @@ use tauri::{AppHandle, Manager};
 
 pub const DEFAULT_HOTKEY: &str = "Ctrl+Alt+D";
 
-/// 持久化到 settings.json 的内容。
+/// 输入长度上限（字符）。超过直接返回 `TooLong`，不截断后偷偷发送（§4.3）。
+pub const MAX_INPUT_CHARS: usize = 5000;
+
+/// 首字符超时。§4.2 规定 15s 内无首字符即 `Timeout`。
+pub const FIRST_CHUNK_TIMEOUT_SECS: u64 = 15;
+
+/// 持久化到 settings.json 的内容。**不含 API Key** —— Key 单独存
+/// Windows 凭据管理器（§4.3、§6），见 `credentials.rs`。
+///
+/// 新增字段一律带 `#[serde(default)]`：M0 落盘的 settings.json 只有 `hotkey`，
+/// 少一个默认值就会让老配置整个解析失败、静默退回默认热键。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub hotkey: String,
+    #[serde(default)]
+    pub provider: ProviderSettings,
+    #[serde(default)]
+    pub languages: LanguagePair,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             hotkey: DEFAULT_HOTKEY.to_string(),
+            provider: ProviderSettings::default(),
+            languages: LanguagePair::default(),
+        }
+    }
+}
+
+/// Provider 配置。**模型串与端点写在配置里，不硬编码在业务逻辑**（§4.3）——
+/// 模型命名变动频繁，写死等于每次改名都要重新发版。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderSettings {
+    /// 凭据条目的 key，见 `credentials::service_name`。
+    pub id: String,
+    pub model: String,
+    pub endpoint: String,
+    /// 「获取免费 API Key」按钮的落地页。§5.1 要求这个 URL 写在配置里
+    /// 而不是硬编码：AI Studio 改版路径不是小概率事件，链接失效比没有链接更糟。
+    pub api_key_url: String,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            id: "gemini".to_string(),
+            model: "gemini-2.5-flash-lite".to_string(),
+            endpoint: "https://generativelanguage.googleapis.com/v1beta".to_string(),
+            api_key_url: "https://aistudio.google.com/apikey".to_string(),
+        }
+    }
+}
+
+/// 语言对：母语 + 外语（§3.0、§5）。不是「目标语言」——
+/// 方向由源语言与这一对的关系推出来，用户永远不用手动切。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LanguagePair {
+    pub native: String,
+    pub foreign: String,
+}
+
+impl Default for LanguagePair {
+    fn default() -> Self {
+        Self {
+            native: "zh".to_string(),
+            foreign: "en".to_string(),
         }
     }
 }
@@ -29,6 +86,10 @@ pub struct SettingsView {
     pub hotkey: String,
     pub hotkey_registered: bool,
     pub hotkey_error: Option<String>,
+    pub provider: ProviderSettings,
+    pub languages: LanguagePair,
+    /// 凭据管理器里有没有 Key。只报有无，**绝不把 Key 本身送给前端**。
+    pub has_api_key: bool,
 }
 
 pub fn config_dir(app: &AppHandle) -> Option<PathBuf> {
