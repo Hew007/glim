@@ -77,6 +77,9 @@ pub struct PanelShowPayload {
 struct Flags {
     first_chunk: AtomicBool,
     finished: AtomicBool,
+    /// 收到的增量条数。门禁 1.1 要证明输出是「流式」而不是一次性返回，
+    /// 而译文本身不能落盘（§6：不存历史），所以只记条数。
+    chunks: AtomicU64,
 }
 
 struct Active {
@@ -196,6 +199,7 @@ pub fn start(app: &AppHandle, text: String, mode: Mode, direction: Direction) ->
     let flags = Arc::new(Flags {
         first_chunk: AtomicBool::new(false),
         finished: AtomicBool::new(false),
+        chunks: AtomicU64::new(0),
     });
 
     let handle = {
@@ -295,7 +299,13 @@ async fn run(
         return;
     }
 
-    crate::panel::log_line(&app, &format!("[req:done] request={request_id}\n"));
+    crate::panel::log_line(
+        &app,
+        &format!(
+            "[req:done] request={request_id} chunks={}\n",
+            flags.chunks.load(Ordering::SeqCst)
+        ),
+    );
     let _ = app.emit(
         "req:done",
         DonePayload {
@@ -358,6 +368,7 @@ async fn stream_translation(
                     ),
                 );
             }
+            flags.chunks.fetch_add(1, Ordering::SeqCst);
             let _ = app.emit(
                 "req:chunk",
                 ChunkPayload {
