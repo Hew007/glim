@@ -155,30 +155,49 @@ Send-Hotkey
 Start-Sleep -Milliseconds 400
 
 # ---------------------------------------------------------------- 0.1 / 0.1c
-# 0.2 那次 show 也会记一笔采样，清空后重新采，保证正好 20 个样本
-Remove-Item $timingLog -ErrorAction SilentlyContinue
+# 0.1c 测的是 toggle，不该被「点击外部关闭」这条独立路径污染：一次计划外的
+# hide 会让后续每一轮的相位全反，20 轮里第 3 轮出事和第 19 轮出事看起来一样。
+# 因此发现计划外 hide 就整轮重测，最终留下的必须是一次零干扰的干净测量 ——
+# 排除干扰不是放宽门禁，干扰次数照常打印出来。
 [void][W]::SetCursorPos(600, 500)
-$toggleOk = $true
-for ($i = 1; $i -le 20; $i++) {
-  Send-Hotkey
-  Start-Sleep -Milliseconds 300
-  if (-not [W]::IsWindowVisible($hwnd)) { $toggleOk = $false; "  第 $i 次 show 后窗口不可见" }
-  Send-Hotkey
-  Start-Sleep -Milliseconds 300
-  if ([W]::IsWindowVisible($hwnd)) { $toggleOk = $false; "  第 $i 次 toggle 后窗口仍可见" }
-}
-"[0.1c] toggle 20 轮全部正确 = $toggleOk"
+$maxAttempts = 3
+$toggleOk = $false
+$strayHides = @()
 
-# 相位一旦被一次计划外的 hide 打乱，之后每一轮都会报错，光看 $toggleOk
-# 分不清是产品 bug 还是跑的时候碰了鼠标。把非 toggle 的 hide 原因直接列出来。
-$strayHides = @(Get-Content $timingLog -ErrorAction SilentlyContinue |
-  Where-Object { $_ -match '^\[hide\]' -and $_ -notmatch 'hotkey-toggle' })
-if ($strayHides.Count -gt 0) {
-  "[0.1c] 计划外 hide $($strayHides.Count) 次（toggle 相位被打乱的原因）："
+for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+  # 0.2 那次 show 也会记一笔采样，清空后重新采，保证正好 20 个样本
+  Remove-Item $timingLog -ErrorAction SilentlyContinue
+  if ([W]::IsWindowVisible($hwnd)) { Send-Hotkey; Start-Sleep -Milliseconds 300 }
+
+  $toggleOk = $true
+  $roundErrors = @()
+  for ($i = 1; $i -le 20; $i++) {
+    Send-Hotkey
+    Start-Sleep -Milliseconds 300
+    if (-not [W]::IsWindowVisible($hwnd)) { $toggleOk = $false; $roundErrors += "  第 $i 次 show 后窗口不可见" }
+    Send-Hotkey
+    Start-Sleep -Milliseconds 300
+    if ([W]::IsWindowVisible($hwnd)) { $toggleOk = $false; $roundErrors += "  第 $i 次 toggle 后窗口仍可见" }
+  }
+
+  $strayHides = @(Get-Content $timingLog -ErrorAction SilentlyContinue |
+    Where-Object { $_ -match '^\[hide\]' -and $_ -notmatch 'hotkey-toggle' })
+
+  if ($strayHides.Count -eq 0) {
+    $roundErrors
+    break
+  }
+
+  "[0.1c] 第 $attempt 次测量被 $($strayHides.Count) 次计划外 hide 打断，本次作废重测："
   $strayHides | ForEach-Object { "    $_" }
-} else {
-  "[0.1c] 计划外 hide = 0"
+  if ($attempt -eq $maxAttempts) {
+    "[0.1c] 连续 $maxAttempts 次都被打断 —— 干扰不是偶发，需查明来源后再判定"
+    $roundErrors
+  }
 }
+
+"[0.1c] toggle 20 轮全部正确 = $toggleOk"
+"[0.1c] 本次测量的计划外 hide = $($strayHides.Count)（必须为 0 才算有效测量）"
 
 $samples = @(Get-Content $timingLog | ForEach-Object { if ($_ -match '#(\d+) (\d+)us') { [int]$Matches[2] } })
 "[0.1] 采样数 = $($samples.Count)（期望 20；多出来的每一个都对应一次计划外 hide）"
@@ -190,6 +209,9 @@ if ($samples.Count -gt 0) {
 }
 
 # ---------------------------------------------------------------- 0.3 不夺焦点
+# 起点必须是隐藏态。不要继承上一段的结束状态：0.1c 一旦被干扰打乱相位，
+# 这里按热键就变成了 hide，"[0.3] 面板可见 = False" 其实是上游的连带伤害。
+if ([W]::IsWindowVisible($hwnd)) { Send-Hotkey; Start-Sleep -Milliseconds 400 }
 # Win11 记事本会恢复上次的标签页，裸开会把旧文档的内容一起算进来
 # （实测拿到的是 hosts 文件的首行，而不是本次输入）。指定一个空临时文件。
 $npFile = Join-Path $env:TEMP ("glim-m0-{0}.txt" -f [guid]::NewGuid())
