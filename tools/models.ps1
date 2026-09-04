@@ -13,12 +13,24 @@ param(
   [string]$Key,
   [string]$Set,
   [switch]$Bench,
+  [switch]$NoThinking,
+  [string]$Models,
   [int]$Runs = 5,
   [string]$Proxy = $env:HTTPS_PROXY
 )
 
 $ErrorActionPreference = "Stop"
 $settingsPath = Join-Path $env:APPDATA "glim\settings.json"
+
+# 截断到 n 个字符。直接 Substring(0, n) 在响应短于 n 时会抛异常 ——
+# 上一版就是这么崩的，而且恰好崩在唯一能看到服务端原话的地方。
+function Limit-Text {
+  param([string]$Text, [int]$Max = 300)
+  if (-not $Text) { return "(空响应)" }
+  $t = ($Text -replace '\s+', ' ').Trim()
+  if ($t.Length -le $Max) { return $t }
+  return $t.Substring(0, $Max) + "…"
+}
 
 function Get-KeyFromClipboard {
   $k = ((Get-Clipboard) -join "").Trim()
@@ -32,92 +44,104 @@ function Get-KeyFromClipboard {
 
 # ---------------------------------------------------------------- -Bench 模式
 # 用 curl 直接打流式端点，绕开 Glim 的全部代码。time_starttransfer 即首字节
-# 延迟 —— 门禁 1.2 要求 p50 < 1200ms。同时对比「默认」与「关掉思考」两种
-# 请求体：新一代模型默认会先想再答，而本工具的第一原则是「快 > 全」。
+# 延迟 —— 门禁 1.2 要求 p50 < 1200ms。
+#
+#   -Models a,b,c   横向对比多个模型（不给就用配置里的那个）
+#   -NoThinking     额外跑一组带 thinkingConfig 的请求做对比
 if ($Bench) {
   if (-not $Key) { $Key = Get-KeyFromClipboard }
 
-  $model = "gemini-flash-lite-latest"
+  $configured = "gemini-flash-lite-latest"
   if (Test-Path $settingsPath) {
     $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
-    if ($cfg.provider.model) { $model = $cfg.provider.model }
+    if ($cfg.provider.model) { $configured = $cfg.provider.model }
   }
-  "模型：$model"
+  $modelList = if ($Models) { $Models -split '\s*,\s*' } else { @($configured) }
+
+  "对比模型：$($modelList -join ', ')"
   if ($Proxy) { "代理：$Proxy" }
   ""
 
-  $url = "https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse"
-
-  # 手写 JSON 字面量，不用 ConvertTo-Json ——
-  # 它会把单元素数组 @(@{...}) 拆成对象，contents 的结构就错了，
-  # 服务端一律返回 400。上一版 5 次全是 400 就是栽在这里。
   $prompt = "Translate into Chinese, output only the translation: The quick brown fox jumps over the lazy dog."
 
+  # 手写 JSON 字面量。ConvertTo-Json 会把单元素数组拆成对象，contents 结构就错了。
 $bodyDefault = @"
 {"contents":[{"role":"user","parts":[{"text":"$prompt"}]}]}
 "@
-
 $bodyNoThinking = @"
 {"contents":[{"role":"user","parts":[{"text":"$prompt"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}
 "@
 
-  $variants = @(
-    @{ Name = "默认";     Body = $bodyDefault },
-    @{ Name = "关掉思考"; Body = $bodyNoThinking }
-  )
+  $bodies = @( @{ Name = "默认"; Json = $bodyDefault } )
+  if ($NoThinking) { $bodies += @{ Name = "关掉思考"; Json = $bodyNoThinking } }
 
-  $results = @{}
-  foreach ($variant in $variants) {
-    "【$($variant.Name)】"
-    $file = Join-Path $env:TEMP "glim-bench.json"
-    Set-Content -LiteralPath $file -Value $variant.Body -Encoding UTF8 -NoNewline
+  $summary = @()
 
-    $samples = @()
-    for ($i = 1; $i -le $Runs; $i++) {
-      $curlArgs = @(
-        "-sS", "-o", "NUL",
-        "-H", "x-goog-api-key: $Key",
-        "-H", "Content-Type: application/json",
-        "--data-binary", "@$file",
-        "-w", "%{http_code} %{time_starttransfer} %{time_total}"
-      )
-      if ($Proxy) { $curlArgs += @("--proxy", $Proxy) }
-      $curlArgs += $url
+  foreach ($model in $modelList) {
+    foreach ($body in $bodies) {
+      $label = if ($bodies.Count -gt 1) { "$model / $($body.Name)" } else { $model }
+      "【$label】"
 
-      $out = (& curl.exe @curlArgs) -split '\s+'
-      if ($out.Count -lt 3) { "  第 $i 次：curl 无输出"; continue }
+      $file = Join-Path $env:TEMP "glim-bench.json"
+      Set-Content -LiteralPath $file -Value $body.Json -Encoding UTF8 -NoNewline
+      $url = "https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse"
 
-      $code = $out[0]
-      $ttfb = [double]$out[1] * 1000
-      "  第 $i 次：HTTP $code  首字节 $([math]::Round($ttfb)) ms"
-      if ($code -eq "200") { $samples += $ttfb }
-      elseif ($i -eq 1) {
-        # 首次就非 200，多半是请求体或参数不被接受，把正文打出来看
-        $detailArgs = @("-sS", "-H", "x-goog-api-key: $Key", "-H", "Content-Type: application/json", "--data-binary", "@$file")
-        if ($Proxy) { $detailArgs += @("--proxy", $Proxy) }
-        $detailArgs += $url
-        "    服务端返回：" + ((& curl.exe @detailArgs) -join " ").Substring(0, 300)
+      $samples = @()
+      $aborted = $false
+      for ($i = 1; $i -le $Runs; $i++) {
+        $curlArgs = @(
+          "-sS", "-o", "NUL",
+          "-H", "x-goog-api-key: $Key",
+          "-H", "Content-Type: application/json",
+          "--data-binary", "@$file",
+          "-w", "%{http_code} %{time_starttransfer}"
+        )
+        if ($Proxy) { $curlArgs += @("--proxy", $Proxy) }
+        $curlArgs += $url
+
+        $out = (& curl.exe @curlArgs) -split '\s+'
+        if ($out.Count -lt 2) { "  第 $i 次：curl 无输出"; continue }
+
+        $code = $out[0]
+        $ttfb = [double]$out[1] * 1000
+        "  第 $i 次：HTTP $code  首字节 $([math]::Round($ttfb)) ms"
+
+        if ($code -eq "200") {
+          $samples += $ttfb
+        } else {
+          # 非 200 就把服务端原话打出来 —— 只报状态码等于没报。
+          $detailArgs = @("-sS", "-H", "x-goog-api-key: $Key", "-H", "Content-Type: application/json", "--data-binary", "@$file")
+          if ($Proxy) { $detailArgs += @("--proxy", $Proxy) }
+          $detailArgs += $url
+          "    服务端返回：" + (Limit-Text ((& curl.exe @detailArgs) -join " "))
+          # 请求体本身不被接受时，重复 5 次没有意义。
+          $aborted = $true
+          break
+        }
+        Start-Sleep -Seconds 5   # 免费层约 15 RPM，别把自己限流了
       }
-      Start-Sleep -Seconds 5   # 免费层约 15 RPM，别把自己限流了
-    }
 
-    Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
 
-    if ($samples.Count -gt 0) {
-      $sorted = $samples | Sort-Object
-      $p50 = $sorted[[int]($sorted.Count / 2)]
-      $results[$variant.Name] = $p50
-      "  → 最小 $([math]::Round($sorted[0])) ms  中位 $([math]::Round($p50)) ms  最大 $([math]::Round($sorted[-1])) ms"
-    } else {
-      "  → 没有成功的样本"
+      if ($samples.Count -gt 0) {
+        $sorted = $samples | Sort-Object
+        $p50 = $sorted[[int]($sorted.Count / 2)]
+        "  → 最小 $([math]::Round($sorted[0])) ms  中位 $([math]::Round($p50)) ms  最大 $([math]::Round($sorted[-1])) ms"
+        $summary += [pscustomobject]@{ 配置 = $label; 中位 = [math]::Round($p50); 最小 = [math]::Round($sorted[0]); 最大 = [math]::Round($sorted[-1]) }
+      } elseif ($aborted) {
+        "  → 请求体或模型不被接受，已跳过剩余次数"
+      } else {
+        "  → 没有成功的样本"
+      }
+      ""
     }
-    ""
   }
 
-  "门禁 1.2 要求首字符 p50 < 1200ms："
-  foreach ($name in $results.Keys) {
-    $verdict = if ($results[$name] -lt 1200) { "达标" } else { "不达标" }
-    "  $name : 中位 $([math]::Round($results[$name])) ms —— $verdict"
+  if ($summary.Count -gt 0) {
+    "汇总（门禁 1.2 要求首字符 p50 < 1200ms）："
+    $summary |
+      Select-Object 配置, 最小, 中位, 最大, @{n='1.2'; e={ if ($_.中位 -lt 1200) { '达标' } else { '不达标' } }} |
+      Format-Table -AutoSize
   }
   return
 }
