@@ -55,7 +55,10 @@ impl Default for ProviderSettings {
     fn default() -> Self {
         Self {
             id: "gemini".to_string(),
-            model: "gemini-2.5-flash-lite".to_string(),
+            // 用 `-latest` 别名而不是钉死版本号：模型改名频繁，实测
+            // gemini-2.5-flash-lite 已经返回 404。别名会自动跟着走，
+            // 想要行为绝对稳定再在配置里换成带版本号的具体型号。
+            model: "gemini-flash-lite-latest".to_string(),
             endpoint: "https://generativelanguage.googleapis.com/v1beta".to_string(),
             api_key_url: "https://aistudio.google.com/apikey".to_string(),
         }

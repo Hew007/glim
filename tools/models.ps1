@@ -69,17 +69,31 @@ try {
   return
 }
 
-$streaming = @($response.models | Where-Object {
-  $_.supportedGenerationMethods -contains 'streamGenerateContent'
-})
+# 早期版本只按 supportedGenerationMethods 筛，实测该字段在响应里已经不存在，
+# 于是筛出 0 个、误报成「没有支持流式的模型」。字段在就用字段，不在就退回
+# 按名字排除明显不是文本生成的那些族（图像、视频、音乐、语音、向量…）。
+$hasMethods = @($response.models | Where-Object { $_.supportedGenerationMethods }).Count -gt 0
+
+$nonText = 'embedding|^models/veo|lyria|-tts|image|transcribe|audio|^models/aqa|robotics|computer-use|deep-research|nano-banana|antigravity'
+
+if ($hasMethods) {
+  $streaming = @($response.models | Where-Object {
+    $_.supportedGenerationMethods -contains 'streamGenerateContent'
+  })
+  "（按 supportedGenerationMethods 字段筛选）"
+} else {
+  $streaming = @($response.models | Where-Object { $_.name -notmatch $nonText })
+  "（响应里没有 supportedGenerationMethods 字段，改为按模型族排除非文本模型 ——"
+  " 这是推断，最终以实际能否翻译为准）"
+}
 
 if ($streaming.Count -eq 0) {
-  "这个 Key 下没有支持流式生成的模型。返回的全部模型："
+  "筛不出可用的文本模型。返回的全部模型："
   $response.models | Select-Object @{n='模型串';e={$_.name -replace '^models/',''}} | Format-Table -AutoSize
   return
 }
 
-"支持流式生成的模型（$($streaming.Count) 个）："
+"候选模型（$($streaming.Count) 个）："
 $streaming |
   Select-Object `
     @{n='模型串'; e={ $_.name -replace '^models/','' }},
@@ -87,8 +101,13 @@ $streaming |
     @{n='输入上限'; e={ $_.inputTokenLimit }} |
   Format-Table -AutoSize
 
-$lite = $streaming | Where-Object { $_.name -match 'lite' } | Select-Object -First 1
-$pick = if ($lite) { $lite } else { $streaming | Where-Object { $_.name -match 'flash' } | Select-Object -First 1 }
+# 优先挑 `-latest` 别名：Google 改模型名时别名自动跟着走，不会再出现
+# 写死的型号某天突然 404 的情况。
+$pick =
+  ($streaming | Where-Object { $_.name -match 'flash-lite-latest' } | Select-Object -First 1) ??
+  ($streaming | Where-Object { $_.name -match 'flash-latest' }      | Select-Object -First 1) ??
+  ($streaming | Where-Object { $_.name -match 'lite' }              | Select-Object -First 1) ??
+  ($streaming | Where-Object { $_.name -match 'flash' }             | Select-Object -First 1)
 if ($pick) {
   $name = $pick.name -replace '^models/',''
   ""
