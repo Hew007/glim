@@ -15,7 +15,7 @@ param(
   [switch]$Bench,
   [switch]$NoThinking,
   [string]$Models,
-  [int]$Runs = 5,
+  [int]$Runs = 10,
   [string]$Proxy = $env:HTTPS_PROXY
 )
 
@@ -87,6 +87,7 @@ $bodyNoThinking = @"
       $url = "https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse"
 
       $samples = @()
+      $failures = 0
       $aborted = $false
       for ($i = 1; $i -le $Runs; $i++) {
         $curlArgs = @(
@@ -114,9 +115,16 @@ $bodyNoThinking = @"
           if ($Proxy) { $detailArgs += @("--proxy", $Proxy) }
           $detailArgs += $url
           "    服务端返回：" + (Limit-Text ((& curl.exe @detailArgs) -join " "))
-          # 请求体本身不被接受时，重复 5 次没有意义。
-          $aborted = $true
-          break
+
+          # 只有结构性拒绝才值得中止：请求体或模型不被接受，重试多少次都一样。
+          # 429 / 5xx 是临时故障 —— 上一版把 503 也当成结构性拒绝，于是
+          # gemini-3.5-flash-lite 只采到 1 个样本就收工，还被汇总表判成「达标」。
+          # 临时故障要计入失败率继续跑，不能提前收摊。
+          if ($code -in @("400", "401", "403", "404")) {
+            $aborted = $true
+            break
+          }
+          $failures += 1
         }
         Start-Sleep -Seconds 5   # 免费层约 15 RPM，别把自己限流了
       }
@@ -126,8 +134,14 @@ $bodyNoThinking = @"
       if ($samples.Count -gt 0) {
         $sorted = $samples | Sort-Object
         $p50 = $sorted[[int]($sorted.Count / 2)]
-        "  → 最小 $([math]::Round($sorted[0])) ms  中位 $([math]::Round($p50)) ms  最大 $([math]::Round($sorted[-1])) ms"
-        $summary += [pscustomobject]@{ 配置 = $label; 中位 = [math]::Round($p50); 最小 = [math]::Round($sorted[0]); 最大 = [math]::Round($sorted[-1]) }
+        "  → 最小 $([math]::Round($sorted[0])) ms  中位 $([math]::Round($p50)) ms  最大 $([math]::Round($sorted[-1])) ms  成功 $($samples.Count)/$Runs"
+        $summary += [pscustomobject]@{
+          配置 = $label
+          样本 = "$($samples.Count)/$Runs"
+          最小 = [math]::Round($sorted[0])
+          中位 = [math]::Round($p50)
+          最大 = [math]::Round($sorted[-1])
+        }
       } elseif ($aborted) {
         "  → 请求体或模型不被接受，已跳过剩余次数"
       } else {
@@ -138,10 +152,20 @@ $bodyNoThinking = @"
   }
 
   if ($summary.Count -gt 0) {
-    "汇总（门禁 1.2 要求首字符 p50 < 1200ms）："
+    "汇总（门禁 1.2 要求首字符 p50 < 1200ms，取 10 次的中位数）："
     $summary |
-      Select-Object 配置, 最小, 中位, 最大, @{n='1.2'; e={ if ($_.中位 -lt 1200) { '达标' } else { '不达标' } }} |
+      Select-Object 配置, 样本, 最小, 中位, 最大, @{n='1.2'; e={
+        # 样本不足 10 个就不给结论。门禁写的是「记录 10 次，取中位数」，
+        # 拿 1 个样本判「达标」是自欺 —— 上一版就这么干过。
+        $n = [int](($_.样本 -split '/')[0])
+        if ($n -lt 10) { "样本不足($n)" }
+        elseif ($_.中位 -lt 1200) { '达标' }
+        else { '不达标' }
+      }} |
       Format-Table -AutoSize
+    ""
+    "注意：实测同一配置在不同时段的中位数可相差十倍（1417ms vs 13930ms），"
+    "单次 bench 不足以判定门禁，需在不同时段重复取样。"
   }
   return
 }
