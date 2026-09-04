@@ -150,16 +150,19 @@ fn emit_error(app: &AppHandle, request_id: &str, kind: ErrorKind, message: impl 
     );
 }
 
-fn current_id(app: &AppHandle) -> Option<String> {
-    let state = app.state::<RequestState>();
-    let guard = state.active.lock().unwrap();
-    guard.as_ref().map(|a| a.id.clone())
-}
-
 /// 无条件取消当前请求。发起新请求前必调（§4.3）。
-pub fn cancel_active(app: &AppHandle) {
+///
+/// 日志打在这里而不是调用方：`toggle` 处理「Loading 中按热键」时会先调
+/// 本函数、再让前端发起新请求，等 `start` 去检查时 active 已经是空的，
+/// 于是取消这件事永远不会被记下来 —— 门禁 1.5 因此报「取消旧请求 0 次」，
+/// 而实际上取消了。埋点跟着行为走，不跟着调用顺序走。
+pub fn cancel_active(app: &AppHandle, reason: &str) {
     let previous = app.state::<RequestState>().active.lock().unwrap().take();
     if let Some(active) = previous {
+        crate::panel::log_line(
+            app,
+            &format!("[req:cancel] request={} reason={reason}\n", active.id),
+        );
         active.handle.abort();
     }
 }
@@ -192,10 +195,7 @@ pub fn start(app: &AppHandle, text: String, mode: Mode, direction: Direction) ->
     let id = state.next_id.fetch_add(1, Ordering::SeqCst).to_string();
 
     // 发起新请求前无条件取消旧的（§4.3）。
-    if let Some(previous) = current_id(app) {
-        crate::panel::log_line(app, &format!("[req:cancel] request={previous} reason=superseded\n"));
-    }
-    cancel_active(app);
+    cancel_active(app, "superseded");
     crate::panel::log_line(app, &format!("[req:start] request={id}\n"));
 
     let flags = Arc::new(Flags {

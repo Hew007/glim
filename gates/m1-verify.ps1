@@ -96,14 +96,33 @@ function Get-Log {
 
 # 等日志里出现某个模式，或超时。轮询而不是死等固定秒数，
 # 因为实测首字节延迟在 868ms 到 61s 之间漂移，写死等待时间必然误判。
-function Wait-ForLog([string]$Pattern, [int]$TimeoutSeconds = 25) {
+#
+# $Skip 是基线行数，**必不可少**：日志是追加的，不从基线之后找的话，
+# 第 2 轮会立刻匹配到第 1 轮留下的 [req:done]，当场返回，然后调用方
+# 一个 Esc 把正在进行的请求掐断 —— 上一版 10 轮只完成 1 轮就是这么来的。
+#
+# 结果用 @() 包住：Where-Object 只命中一条时返回的是字符串本身，
+# 此时 [-1] 取到的是**最后一个字符**（实测把「请分段」显示成了「段」）。
+function Wait-ForLog([string]$Pattern, [int]$TimeoutSeconds = 25, [int]$Skip = 0) {
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   while ((Get-Date) -lt $deadline) {
-    $hit = Get-Log | Where-Object { $_ -match $Pattern }
-    if ($hit) { return $hit[-1] }
+    $lines = @(Get-Log)
+    if ($lines.Count -gt $Skip) {
+      $hits = @($lines[$Skip..($lines.Count - 1)] | Where-Object { $_ -match $Pattern })
+      if ($hits.Count -gt 0) { return $hits[-1] }
+    }
     Start-Sleep -Milliseconds 250
   }
   return $null
+}
+
+function Get-LogCount { return @(Get-Log).Count }
+
+# 从 [req:error] 行里取出人话部分。用非贪婪，且不再拿 [-1] 索引字符串。
+function Get-Message([string]$Line) {
+  if (-not $Line) { return "" }
+  if ($Line -match 'message=(.*)$') { return $Matches[1] }
+  return $Line
 }
 
 function Should-Run([string]$Id) {
@@ -155,9 +174,10 @@ if ((Should-Run "1.1") -or (Should-Run "1.2")) {
     # 每次换一句，避免服务端缓存掩盖真实延迟
     Set-Clipboard -Value "The quick brown fox jumps over the lazy dog. Attempt number $i."
     Start-Sleep -Milliseconds 300
+    $baseline = Get-LogCount
     Send-Hotkey
-    $done = Wait-ForLog "\[req:done\] request=\d+ chunks=\d+" 30
-    if (-not $done) { "  第 $i 次：超时或失败" }
+    $done = Wait-ForLog "\[req:done\] request=\d+ chunks=\d+" 40 $baseline
+    if (-not $done) { "  第 $i 次：超时或失败" } else { "  第 $i 次：$done" }
     Send-Escape
     Start-Sleep -Milliseconds 600
   }
@@ -167,10 +187,12 @@ if ((Should-Run "1.1") -or (Should-Run "1.2")) {
     if ($line -match '\[req:done\] request=\d+ chunks=(\d+)') { $chunkCounts += [int]$Matches[1] }
   }
 
-  # 1.1：出了译文且是分多次送达的，才算「流式」
+  # 1.1：出了译文且是分多次送达的，才算「流式」。
+  # 门槛定在 8/10：上一版写的是「至少 1 次成功即通过」，结果 1/10 也判了
+  # 通过 —— 一个十次里失败八次的翻译工具，谈不上「打通翻译」。
   $streamed = @($chunkCounts | Where-Object { $_ -ge 2 }).Count
-  Record "1.1" ($chunkCounts.Count -gt 0 -and $streamed -gt 0) `
-    "完成 $($chunkCounts.Count)/$Runs 次，其中 $streamed 次的增量条数 >= 2（证明是流式而非一次性返回）。译文正确性需人工核对截图。"
+  Record "1.1" ($chunkCounts.Count -ge 8 -and $streamed -ge 8) `
+    "完成 $($chunkCounts.Count)/$Runs 次，其中 $streamed 次的增量条数 >= 2（证明是流式而非一次性返回，门槛 8/$Runs）。译文正确性需人工核对。"
 
   if ($samples.Count -gt 0) {
     $sorted = $samples | Sort-Object
@@ -195,16 +217,18 @@ if (Should-Run "1.6") {
   $bmp = New-Object System.Drawing.Bitmap 16, 16
   [System.Windows.Forms.Clipboard]::SetImage($bmp)
   Start-Sleep -Milliseconds 400
+  $baseline = Get-LogCount
   Send-Hotkey
-  $imageHit = Wait-ForLog "\[req:error\] kind=EmptyClipboard" 10
+  $imageHit = Wait-ForLog "\[req:error\] kind=EmptyClipboard" 10 $baseline
   Send-Escape
   Start-Sleep -Milliseconds 600
 
   # 纯空白
   Set-Clipboard -Value "   `t  "
   Start-Sleep -Milliseconds 400
+  $baseline = Get-LogCount
   Send-Hotkey
-  $blankHit = Wait-ForLog "\[req:error\] kind=EmptyClipboard" 10
+  $blankHit = Wait-ForLog "\[req:error\] kind=EmptyClipboard" 10 $baseline
   Send-Escape
 
   Record "1.6" ($null -ne $imageHit -and $null -ne $blankHit) `
@@ -222,8 +246,9 @@ if (Should-Run "1.7") {
 
   Set-Clipboard -Value ("a" * 5001)
   Start-Sleep -Milliseconds 400
+  $baseline = Get-LogCount
   Send-Hotkey
-  $hit = Wait-ForLog "\[req:error\] kind=TooLong" 10
+  $hit = Wait-ForLog "\[req:error\] kind=TooLong" 10 $baseline
   Send-Escape
 
   # 边界：正好 5000 不该被拒
@@ -236,7 +261,7 @@ if (Should-Run "1.7") {
   Send-Escape
 
   Record "1.7" ($null -ne $hit -and -not $falsePositive) `
-    "5001 字符：$(if ($hit) { "判定为 TooLong（$($hit -replace '.*message=','')）" } else { '未命中' })；5000 字符边界未被误拒：$(-not $falsePositive)"
+    "5001 字符：$(if ($hit) { "判定为 TooLong（$(Get-Message $hit)）" } else { '未命中' })；5000 字符边界未被误拒：$(-not $falsePositive)"
   Stop-Glim $proc
 }
 
@@ -260,7 +285,9 @@ if (Should-Run "1.5") {
 
   $log = Get-Log
   $starts    = @($log | Where-Object { $_ -match '\[req:start\]' })
-  $cancels   = @($log | Where-Object { $_ -match '\[req:cancel\].*reason=superseded' })
+  # 取消的埋点已移进 cancel_active，reason 可能是 hotkey-while-loading
+  # 或 superseded，两者都算「旧请求被取消」。
+  $cancels   = @($log | Where-Object { $_ -match '\[req:cancel\]' })
   $reloads   = @($log | Where-Object { $_ -match '\[reload\] hotkey-while-loading' })
   $lastDone  = @($log | Where-Object { $_ -match '\[req:done\]' })[-1]
 
@@ -285,8 +312,9 @@ if (Should-Run "1.4") {
 
   Set-Clipboard -Value "Hello world."
   Start-Sleep -Milliseconds 400
+  $baseline = Get-LogCount
   Send-Hotkey
-  $hit = Wait-ForLog "\[req:error\] kind=NoApiKey" 15
+  $hit = Wait-ForLog "\[req:error\] kind=NoApiKey" 15 $baseline
   Send-Escape
   Stop-Glim $proc
   Restore-Settings
@@ -308,14 +336,15 @@ if (Should-Run "1.3") {
 
   Set-Clipboard -Value "Hello world."
   Start-Sleep -Milliseconds 400
+  $baseline = Get-LogCount
   Send-Hotkey
-  $hit = Wait-ForLog "\[req:error\] kind=Network" 25
+  $hit = Wait-ForLog "\[req:error\] kind=Network" 25 $baseline
   Send-Escape
   Stop-Glim $proc
   Restore-Settings
 
   Record "1.3" ($null -ne $hit) `
-    "$(if ($hit) { "判定为 Network（$($hit -replace '.*message=','')）" } else { '未命中 Network' })。重试按钮需人工点一次确认。"
+    "$(if ($hit) { "判定为 Network（$(Get-Message $hit)）" } else { '未命中 Network' })。重试按钮需人工点一次确认。"
 }
 
 } finally {

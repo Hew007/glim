@@ -124,7 +124,7 @@ pub fn hide(app: &AppHandle, reason: &str) {
     app.state::<PanelState>().visible.store(false, Ordering::SeqCst);
     hotkey::unregister_escape(app);
     // 看完即走：窗口一关，在途请求就没有接收方了，留着只会白烧配额。
-    request::cancel_active(app);
+    request::cancel_active(app, "panel-hidden");
 }
 
 /// 热键再次按下 = toggle（§2.1 规则 6）。
@@ -139,7 +139,7 @@ pub fn toggle(app: &AppHandle, t0: Instant) {
 
     if app.state::<RequestState>().is_busy() {
         log_line(app, "[reload] hotkey-while-loading\n");
-        request::cancel_active(app);
+        request::cancel_active(app, "hotkey-while-loading");
         announce_clipboard(app);
         return;
     }

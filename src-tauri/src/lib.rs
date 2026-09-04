@@ -73,7 +73,7 @@ fn cancel_request(app: AppHandle, request_id: String) {
     // 传进来的 id 不是当前那个就说明它早已被顶替，无需再取消。
     let state = app.state::<RequestState>();
     if state.is_current(&request_id) {
-        request::cancel_active(&app);
+        request::cancel_active(&app, "ipc:cancel_request");
     }
 }
 
