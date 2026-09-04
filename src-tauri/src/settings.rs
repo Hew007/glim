@@ -114,6 +114,21 @@ pub fn load(app: &AppHandle) -> Settings {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
+/// 文件不存在时把默认配置落盘。
+///
+/// §4.3 规定模型串与端点写在配置里、由用户按需调整 —— 但 `load` 读不到
+/// 就静默返回默认值、从不写回，结果是文件在首次改热键之前根本不存在，
+/// 「去 settings.json 里换个模型」变成一句空话。启动时补这一次写入。
+pub fn ensure_exists(app: &AppHandle) {
+    let Some(path) = settings_path(app) else {
+        return;
+    };
+    if path.exists() {
+        return;
+    }
+    let _ = save(app, &load(app));
+}
+
 pub fn save(app: &AppHandle, settings: &Settings) -> Result<(), String> {
     let dir = config_dir(app).ok_or_else(|| "无法定位配置目录".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败：{e}"))?;

@@ -193,6 +193,7 @@ pub fn run() {
 
             hotkey::spawn_escape_worker(handle.clone());
 
+            settings::ensure_exists(&handle);
             let stored = settings::load(&handle);
             if let Err(message) = hotkey::register(&handle, &stored.hotkey) {
                 hotkey::set_error(&handle, Some(message));

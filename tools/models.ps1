@@ -21,7 +21,23 @@ $settingsPath = Join-Path $env:APPDATA "glim\settings.json"
 # ---------------------------------------------------------------- -Set 模式
 if ($Set) {
   if (-not (Test-Path $settingsPath)) {
-    throw "找不到配置文件 $settingsPath —— 先启动一次 Glim 让它生成。"
+    # 文件不存在是常态而不是异常：Glim 只在保存设置时才写盘，
+    # 没改过热键的话它一直不存在。直接建一个完整的默认配置。
+    "配置文件不存在，新建：$settingsPath"
+    New-Item -ItemType Directory -Force -Path (Split-Path $settingsPath) | Out-Null
+    @{
+      hotkey    = "Ctrl+Alt+D"
+      languages = @{ native = "zh"; foreign = "en" }
+      provider  = @{
+        id          = "gemini"
+        model       = $Set
+        endpoint    = "https://generativelanguage.googleapis.com/v1beta"
+        api_key_url = "https://aistudio.google.com/apikey"
+      }
+    } | ConvertTo-Json -Depth 10 | Set-Content $settingsPath -Encoding UTF8
+    "已把模型设为：$Set"
+    "重启 Glim 生效： Get-Process Glim -EA SilentlyContinue | Stop-Process -Force"
+    return
   }
   $settings = Get-Content $settingsPath -Raw | ConvertFrom-Json
   if (-not $settings.provider) {
