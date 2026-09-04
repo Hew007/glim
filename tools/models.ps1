@@ -23,7 +23,10 @@ $settingsPath = Join-Path $env:APPDATA "glim\settings.json"
 function Get-KeyFromClipboard {
   $k = ((Get-Clipboard) -join "").Trim()
   if (-not $k) { throw "剪贴板里没有内容。先复制 API Key，或用 -Key 参数传进来。" }
-  "（Key 取自剪贴板，前 6 位 $($k.Substring(0, [Math]::Min(6, $k.Length)))…）"
+  # 必须用 Write-Host：PowerShell 的函数会把所有未捕获的输出并入返回值，
+  # 裸写字符串会让调用方拿到「提示语 + Key」的数组，插进请求头就成了
+  # 一串带中文的垃圾，服务端一律回 API_KEY_INVALID。
+  Write-Host "（Key 取自剪贴板，前 6 位 $($k.Substring(0, [Math]::Min(6, $k.Length)))…）"
   return $k
 }
 
