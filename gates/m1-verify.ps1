@@ -15,7 +15,10 @@
 param(
   [string]$Exe = "src-tauri/target/release/Glim.exe",
   [int]$Runs = 10,
-  [string]$Only = ""
+  [string]$Only = "",
+  # 在 1.3 / 1.4 处暂停，让人工看清错误卡片并点「重试」。
+  # 不加这个参数时脚本按完热键就往下走，卡片一闪而过，人工根本来不及看。
+  [switch]$Pause
 )
 
 $ErrorActionPreference = "Stop"
@@ -315,6 +318,14 @@ if (Should-Run "1.4") {
   $baseline = Get-LogCount
   Send-Hotkey
   $hit = Wait-ForLog "\[req:error\] kind=NoApiKey" 15 $baseline
+  if ($Pause) {
+    Write-Host ""
+    Write-Host "  >>> 面板现在应显示「还没有配置 API Key」引导卡片。请确认："
+    Write-Host "      - 显示了完整的 API Key 获取地址，且可选中"
+    Write-Host "      - 显示了免费层数据可能被用于改进产品的隐私告知"
+    Write-Host "      - 是引导卡片而非普通错误态"
+    Read-Host "      看完按回车继续"
+  }
   Send-Escape
   Stop-Glim $proc
   Restore-Settings
@@ -339,6 +350,13 @@ if (Should-Run "1.3") {
   $baseline = Get-LogCount
   Send-Hotkey
   $hit = Wait-ForLog "\[req:error\] kind=Network" 25 $baseline
+  if ($Pause) {
+    Write-Host ""
+    Write-Host "  >>> 面板现在应显示网络错误 + 重试按钮。请点一次「重试」，"
+    Write-Host "      确认它会重新发起请求（端点仍是坏的，所以会再次失败，"
+    Write-Host "      但应能看到它重试了而不是毫无反应）。"
+    Read-Host "      点完按回车继续"
+  }
   Send-Escape
   Stop-Glim $proc
   Restore-Settings
