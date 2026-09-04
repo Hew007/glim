@@ -12,11 +12,80 @@
 param(
   [string]$Key,
   [string]$Set,
+  [switch]$Bench,
+  [int]$Runs = 5,
   [string]$Proxy = $env:HTTPS_PROXY
 )
 
 $ErrorActionPreference = "Stop"
 $settingsPath = Join-Path $env:APPDATA "glim\settings.json"
+
+function Get-KeyFromClipboard {
+  $k = ((Get-Clipboard) -join "").Trim()
+  if (-not $k) { throw "剪贴板里没有内容。先复制 API Key，或用 -Key 参数传进来。" }
+  "（Key 取自剪贴板，前 6 位 $($k.Substring(0, [Math]::Min(6, $k.Length)))…）"
+  return $k
+}
+
+# ---------------------------------------------------------------- -Bench 模式
+# 直接拿 curl 打同一个流式端点，绕开 Glim 自己的代码。
+# time_starttransfer 就是首字节延迟 —— 门禁 1.2 要求 p50 < 1200ms。
+# 这里量的是链路 + 模型；如果这里就慢，那跟 Rust 侧无关。
+if ($Bench) {
+  if (-not $Key) { $Key = Get-KeyFromClipboard }
+
+  $model = "gemini-flash-lite-latest"
+  if (Test-Path $settingsPath) {
+    $cfg = Get-Content $settingsPath -Raw | ConvertFrom-Json
+    if ($cfg.provider.model) { $model = $cfg.provider.model }
+  }
+  "模型：$model"
+  if ($Proxy) { "代理：$Proxy" }
+
+  $url = "https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse"
+  $body = @{
+    contents = @(@{ role = "user"; parts = @(@{ text = "Translate to Chinese: The quick brown fox jumps over the lazy dog." }) })
+  } | ConvertTo-Json -Depth 10 -Compress
+
+  $bodyFile = Join-Path $env:TEMP "glim-bench.json"
+  Set-Content -LiteralPath $bodyFile -Value $body -Encoding UTF8
+
+  $samples = @()
+  for ($i = 1; $i -le $Runs; $i++) {
+    $args = @(
+      "-sS", "-o", "NUL",
+      "-H", "x-goog-api-key: $Key",
+      "-H", "Content-Type: application/json",
+      "--data-binary", "@$bodyFile",
+      "-w", "%{http_code} %{time_namelookup} %{time_connect} %{time_starttransfer} %{time_total}"
+    )
+    if ($Proxy) { $args += @("--proxy", $Proxy) }
+    $args += $url
+
+    $out = (& curl.exe @args) -split '\s+'
+    if ($out.Count -lt 5) { "  第 $i 次：curl 无输出"; continue }
+
+    $code = $out[0]
+    $ttfb = [double]$out[3] * 1000
+    $total = [double]$out[4] * 1000
+    "  第 $i 次：HTTP $code  首字节 $([math]::Round($ttfb)) ms  总计 $([math]::Round($total)) ms"
+    if ($code -eq "200") { $samples += $ttfb }
+    Start-Sleep -Seconds 5   # 免费层约 15 RPM，别把自己限流了
+  }
+
+  Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue
+
+  if ($samples.Count -gt 0) {
+    $sorted = $samples | Sort-Object
+    $p50 = $sorted[[int]($sorted.Count / 2)]
+    ""
+    "首字节延迟：最小 $([math]::Round($sorted[0])) ms  中位 $([math]::Round($p50)) ms  最大 $([math]::Round($sorted[-1])) ms"
+    "门禁 1.2 要求 p50 < 1200ms —— $(if ($p50 -lt 1200) { '达标' } else { '不达标' })"
+  } else {
+    "没有成功的样本。"
+  }
+  return
+}
 
 # ---------------------------------------------------------------- -Set 模式
 if ($Set) {
@@ -59,12 +128,7 @@ if ($Set) {
 }
 
 # ---------------------------------------------------------------- 列出模型
-if (-not $Key) {
-  $Key = (Get-Clipboard) -join ""
-  $Key = $Key.Trim()
-  if (-not $Key) { throw "剪贴板里没有内容。先复制 API Key，或用 -Key 参数传进来。" }
-  "（Key 取自剪贴板，前 6 位 $($Key.Substring(0, [Math]::Min(6, $Key.Length)))…）"
-}
+if (-not $Key) { $Key = Get-KeyFromClipboard }
 
 $endpoint = "https://generativelanguage.googleapis.com/v1beta/models"
 $params = @{

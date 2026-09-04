@@ -333,6 +333,17 @@ async fn stream_translation(
         .await
         .map_err(map_send_error)?;
 
+    // 响应头到达的时刻。它和首字符之间的差值能把「链路慢」与「模型在想」
+    // 分开：前者卡在这一行之前，后者卡在这一行之后。
+    crate::panel::log_line(
+        app,
+        &format!(
+            "[http] request={request_id} status={} headers_at={:.0}ms\n",
+            response.status().as_u16(),
+            started.elapsed().as_millis()
+        ),
+    );
+
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
@@ -342,9 +353,24 @@ async fn stream_translation(
     // 按字节缓冲，不能按 String —— 一个汉字会被拆在两个 chunk 之间，
     // 提前 from_utf8_lossy 就变成替换字符了。
     let mut buffer: Vec<u8> = Vec::new();
+    let mut first_byte_logged = false;
+    let mut total_bytes = 0usize;
     loop {
         let chunk = response.chunk().await.map_err(map_send_error)?;
         let Some(chunk) = chunk else { break };
+        total_bytes += chunk.len();
+        if !first_byte_logged {
+            first_byte_logged = true;
+            // 收到正文第一个字节的时刻。它与 [first-chunk] 的差值说明
+            // 解析问题：有字节进来却没有增量出去，就是 SSE 没被认出来。
+            crate::panel::log_line(
+                app,
+                &format!(
+                    "[first-byte] request={request_id} at={:.0}ms\n",
+                    started.elapsed().as_millis()
+                ),
+            );
+        }
         buffer.extend_from_slice(&chunk);
 
         while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
@@ -352,6 +378,14 @@ async fn stream_translation(
             let Ok(line) = std::str::from_utf8(&line) else {
                 continue;
             };
+            // 头几行原样记下来：如果响应根本不是 SSE（比如返回了完整
+            // JSON 数组），只有看到真实的行长什么样才能发现。
+            if total_bytes < 400 {
+                crate::panel::log_line(
+                    app,
+                    &format!("[sse-line] request={request_id} {:?}\n", line.trim_end()),
+                );
+            }
             let Some(delta) = extract_delta(provider, line.trim_end())? else {
                 continue;
             };
