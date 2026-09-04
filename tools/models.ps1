@@ -28,9 +28,9 @@ function Get-KeyFromClipboard {
 }
 
 # ---------------------------------------------------------------- -Bench 模式
-# 直接拿 curl 打同一个流式端点，绕开 Glim 自己的代码。
-# time_starttransfer 就是首字节延迟 —— 门禁 1.2 要求 p50 < 1200ms。
-# 这里量的是链路 + 模型；如果这里就慢，那跟 Rust 侧无关。
+# 用 curl 直接打流式端点，绕开 Glim 的全部代码。time_starttransfer 即首字节
+# 延迟 —— 门禁 1.2 要求 p50 < 1200ms。同时对比「默认」与「关掉思考」两种
+# 请求体：新一代模型默认会先想再答，而本工具的第一原则是「快 > 全」。
 if ($Bench) {
   if (-not $Key) { $Key = Get-KeyFromClipboard }
 
@@ -41,48 +41,80 @@ if ($Bench) {
   }
   "模型：$model"
   if ($Proxy) { "代理：$Proxy" }
+  ""
 
   $url = "https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse"
-  $body = @{
-    contents = @(@{ role = "user"; parts = @(@{ text = "Translate to Chinese: The quick brown fox jumps over the lazy dog." }) })
-  } | ConvertTo-Json -Depth 10 -Compress
 
-  $bodyFile = Join-Path $env:TEMP "glim-bench.json"
-  Set-Content -LiteralPath $bodyFile -Value $body -Encoding UTF8
+  # 手写 JSON 字面量，不用 ConvertTo-Json ——
+  # 它会把单元素数组 @(@{...}) 拆成对象，contents 的结构就错了，
+  # 服务端一律返回 400。上一版 5 次全是 400 就是栽在这里。
+  $prompt = "Translate into Chinese, output only the translation: The quick brown fox jumps over the lazy dog."
 
-  $samples = @()
-  for ($i = 1; $i -le $Runs; $i++) {
-    $args = @(
-      "-sS", "-o", "NUL",
-      "-H", "x-goog-api-key: $Key",
-      "-H", "Content-Type: application/json",
-      "--data-binary", "@$bodyFile",
-      "-w", "%{http_code} %{time_namelookup} %{time_connect} %{time_starttransfer} %{time_total}"
-    )
-    if ($Proxy) { $args += @("--proxy", $Proxy) }
-    $args += $url
+$bodyDefault = @"
+{"contents":[{"role":"user","parts":[{"text":"$prompt"}]}]}
+"@
 
-    $out = (& curl.exe @args) -split '\s+'
-    if ($out.Count -lt 5) { "  第 $i 次：curl 无输出"; continue }
+$bodyNoThinking = @"
+{"contents":[{"role":"user","parts":[{"text":"$prompt"}]}],"generationConfig":{"thinkingConfig":{"thinkingBudget":0}}}
+"@
 
-    $code = $out[0]
-    $ttfb = [double]$out[3] * 1000
-    $total = [double]$out[4] * 1000
-    "  第 $i 次：HTTP $code  首字节 $([math]::Round($ttfb)) ms  总计 $([math]::Round($total)) ms"
-    if ($code -eq "200") { $samples += $ttfb }
-    Start-Sleep -Seconds 5   # 免费层约 15 RPM，别把自己限流了
+  $variants = @(
+    @{ Name = "默认";     Body = $bodyDefault },
+    @{ Name = "关掉思考"; Body = $bodyNoThinking }
+  )
+
+  $results = @{}
+  foreach ($variant in $variants) {
+    "【$($variant.Name)】"
+    $file = Join-Path $env:TEMP "glim-bench.json"
+    Set-Content -LiteralPath $file -Value $variant.Body -Encoding UTF8 -NoNewline
+
+    $samples = @()
+    for ($i = 1; $i -le $Runs; $i++) {
+      $curlArgs = @(
+        "-sS", "-o", "NUL",
+        "-H", "x-goog-api-key: $Key",
+        "-H", "Content-Type: application/json",
+        "--data-binary", "@$file",
+        "-w", "%{http_code} %{time_starttransfer} %{time_total}"
+      )
+      if ($Proxy) { $curlArgs += @("--proxy", $Proxy) }
+      $curlArgs += $url
+
+      $out = (& curl.exe @curlArgs) -split '\s+'
+      if ($out.Count -lt 3) { "  第 $i 次：curl 无输出"; continue }
+
+      $code = $out[0]
+      $ttfb = [double]$out[1] * 1000
+      "  第 $i 次：HTTP $code  首字节 $([math]::Round($ttfb)) ms"
+      if ($code -eq "200") { $samples += $ttfb }
+      elseif ($i -eq 1) {
+        # 首次就非 200，多半是请求体或参数不被接受，把正文打出来看
+        $detailArgs = @("-sS", "-H", "x-goog-api-key: $Key", "-H", "Content-Type: application/json", "--data-binary", "@$file")
+        if ($Proxy) { $detailArgs += @("--proxy", $Proxy) }
+        $detailArgs += $url
+        "    服务端返回：" + ((& curl.exe @detailArgs) -join " ").Substring(0, 300)
+      }
+      Start-Sleep -Seconds 5   # 免费层约 15 RPM，别把自己限流了
+    }
+
+    Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+
+    if ($samples.Count -gt 0) {
+      $sorted = $samples | Sort-Object
+      $p50 = $sorted[[int]($sorted.Count / 2)]
+      $results[$variant.Name] = $p50
+      "  → 最小 $([math]::Round($sorted[0])) ms  中位 $([math]::Round($p50)) ms  最大 $([math]::Round($sorted[-1])) ms"
+    } else {
+      "  → 没有成功的样本"
+    }
+    ""
   }
 
-  Remove-Item -LiteralPath $bodyFile -Force -ErrorAction SilentlyContinue
-
-  if ($samples.Count -gt 0) {
-    $sorted = $samples | Sort-Object
-    $p50 = $sorted[[int]($sorted.Count / 2)]
-    ""
-    "首字节延迟：最小 $([math]::Round($sorted[0])) ms  中位 $([math]::Round($p50)) ms  最大 $([math]::Round($sorted[-1])) ms"
-    "门禁 1.2 要求 p50 < 1200ms —— $(if ($p50 -lt 1200) { '达标' } else { '不达标' })"
-  } else {
-    "没有成功的样本。"
+  "门禁 1.2 要求首字符 p50 < 1200ms："
+  foreach ($name in $results.Keys) {
+    $verdict = if ($results[$name] -lt 1200) { "达标" } else { "不达标" }
+    "  $name : 中位 $([math]::Round($results[$name])) ms —— $verdict"
   }
   return
 }
